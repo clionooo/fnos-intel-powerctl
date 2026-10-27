@@ -45,7 +45,8 @@ GATEWAY_PREFIX = "/app/intel-powerctl"
 MSR_RAPL_POWER_UNIT = 0x606   # 功耗/能耗/时间单位
 MSR_PKG_POWER_LIMIT = 0x610   # 封装功耗墙 PL1/PL2
 MSR_PKG_ENERGY_STATUS = 0x611  # 封装能耗累计计数器
-MSR_ENERGY_PERF_BIAS = 0x1FC  # 能效偏好 0~15
+MSR_ENERGY_PERF_BIAS = 0x1FC  # 能效偏好 0~15（HWP 平台上内核不读，兼容性写入）
+MSR_HWP_REQUEST = 0x774      # HWP EPP 0~255（intel_pstate=active 时内核实际使用的能效旋钮）
 
 MSR_PATHS = sorted(glob.glob("/dev/cpu/[0-9]*/msr"))
 
@@ -122,11 +123,12 @@ def read_power_limit() -> dict:
         "pl2Enabled": pl2_on,
         "tau": round(_raw_to_tau(tau_n, tunit), 2),
         "tunit": tunit,
+        "epp": _msr_read(MSR_PATHS[0], MSR_HWP_REQUEST) & 0xFF,
         "epb": _msr_read(MSR_PATHS[0], MSR_ENERGY_PERF_BIAS) & 0xF,
     }
 
 
-def write_power_limit(pl1: float, pl2: float, tau: float, epb: int):
+def write_power_limit(pl1: float, pl2: float, tau: float, epp: int):
     """写功耗墙到所有 CPU 的 MSR（保留保留位，read-modify-write）"""
     if not MSR_PATHS:
         raise OSError("MSR 设备不可用：请先执行 modprobe msr 并重启本应用")
@@ -143,9 +145,11 @@ def write_power_limit(pl1: float, pl2: float, tau: float, epb: int):
         new |= (1 << 47)                          # PL2 enable
         new |= _tau_to_raw(tau, tunit) << 49      # 时间窗
         _msr_write(msr, MSR_PKG_POWER_LIMIT, new)
-        # 能效偏好：0~15
+        # 能效偏好：EPP 0~255（HWP 平台内核实际读取），同时兼容写 EPB 低 4 位
+        old_epp = _msr_read(msr, MSR_HWP_REQUEST)
+        _msr_write(msr, MSR_HWP_REQUEST, (old_epp & ~0xFF) | (epp & 0xFF))
         old_epb = _msr_read(msr, MSR_ENERGY_PERF_BIAS)
-        _msr_write(msr, MSR_ENERGY_PERF_BIAS, (old_epb & ~0xF) | (epb & 0xF))
+        _msr_write(msr, MSR_ENERGY_PERF_BIAS, (old_epb & ~0xF) | ((epp >> 4) & 0xF))
 
 
 def _rapl_energy_unit() -> float:
@@ -227,10 +231,95 @@ def apply_saved_or_defaults():
         cfg = load_config()
         if cfg.get("pl1"):
             try:
-                write_power_limit(cfg["pl1"], cfg["pl2"], cfg["tau"], cfg.get("epb", 6))
+                write_power_limit(cfg["pl1"], cfg["pl2"], cfg["tau"],
+                                  cfg.get("epp", min(255, cfg.get("epb", 6) * 16)))
                 print(f"[boot] 已恢复上次配置: PL1={cfg['pl1']}W PL2={cfg['pl2']}W")
             except (IOError, OSError) as e:
                 print(f"[boot] 恢复配置失败（可能被 BIOS 锁定）: {e}", file=sys.stderr)
+
+
+
+# ------------------------------------------------------------------
+# 分时自动策略（评测方案 C）：空闲省电，负载上来自动放开
+AUTO_IDLE = {"pl1": 35, "pl2": 65, "tau": 32, "epp": 255}
+AUTO_PERF = {"pl1": 55, "pl2": 90, "tau": 8,  "epp": 128}
+_auto = {"enabled": False, "state": "-", "hi_since": 0.0, "lo_since": 0.0}
+
+
+def _loadavg1() -> float:
+    try:
+        return os.getloadavg()[0]
+    except OSError:
+        return 0.0
+
+
+def _apply_profile(p: dict):
+    try:
+        with _lock:
+            write_power_limit(p["pl1"], p["pl2"], p["tau"], p["epp"])
+        save_config(dict(p, auto_enabled=_auto["enabled"]))
+        print(f"[auto] 切换到 {p['pl1']}W 档（state={_auto['state']}）")
+    except (IOError, OSError) as e:
+        print(f"[auto] 切换失败: {e}", file=sys.stderr)
+
+
+def _auto_loop():
+    while True:
+        try:
+            if _auto["enabled"] and MSR_PATHS:
+                load = _loadavg1()
+                now = time.time()
+                if load > 1.5:
+                    _auto["lo_since"] = 0.0
+                    if not _auto["hi_since"]:
+                        _auto["hi_since"] = now
+                    elif now - _auto["hi_since"] >= 30 and _auto["state"] != "perf":
+                        _auto["state"] = "perf"
+                        _apply_profile(AUTO_PERF)
+                elif load < 0.5:
+                    _auto["hi_since"] = 0.0
+                    if not _auto["lo_since"]:
+                        _auto["lo_since"] = now
+                    elif now - _auto["lo_since"] >= 600 and _auto["state"] != "idle":
+                        _auto["state"] = "idle"
+                        _apply_profile(AUTO_IDLE)
+                else:
+                    _auto["hi_since"] = 0.0
+                    _auto["lo_since"] = 0.0
+            time.sleep(30)
+        except Exception as e:  # 自动线程绝不能死
+            print(f"[auto] 轮询异常: {e}", file=sys.stderr)
+            time.sleep(30)
+
+
+# ------------------------------------------------------------------
+# no_turbo（关睿频）与 PCIe ASPM
+def read_no_turbo():
+    try:
+        return open("/sys/devices/system/cpu/intel_pstate/no_turbo").read().strip() == "1"
+    except (IOError, ValueError):
+        return None
+
+
+def write_no_turbo(on: bool):
+    with open("/sys/devices/system/cpu/intel_pstate/no_turbo", "w") as f:
+        f.write("1" if on else "0")
+
+
+def read_aspm() -> dict:
+    try:
+        content = open("/sys/module/pcie_aspm/parameters/policy").read()
+        policies = [x.strip("[]\n") for x in content.split()]
+        current = next((x for x in policies if x.startswith("[")), None)
+        return {"policies": [p for p in policies if p and not p.startswith("[")],
+                "current": current}
+    except (IOError, OSError):
+        return {"policies": [], "current": None}
+
+
+def write_aspm(policy: str):
+    with open("/sys/module/pcie_aspm/parameters/policy", "w") as f:
+        f.write(policy)
 
 
 # ------------------------------------------------------------------
@@ -279,8 +368,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {
                     "ok": True, "msr": True,
                     "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"],
-                    "epb": lim["epb"],
+                    "epp": lim["epp"], "tunit": lim["tunit"],
                     "power": power, "temp": read_cpu_temp(), "freq": read_freq(),
+                    "load": _loadavg1(),
+                    "auto": {"enabled": _auto["enabled"], "state": _auto["state"]},
+                    "noTurbo": read_no_turbo(),
+                    "aspm": read_aspm(),
                 })
             except (IOError, OSError) as e:
                 self._json(500, {"ok": False, "error": f"MSR 读取失败: {e}"})
@@ -304,21 +397,23 @@ class Handler(BaseHTTPRequestHandler):
                 pl1 = max(25.0, min(150.0, float(req["pl1"])))
                 pl2 = max(25.0, min(200.0, float(req["pl2"])))
                 tau = max(0.05, min(448.0, float(req.get("tau", 28))))
-                epb = max(0, min(15, int(req.get("epb", 6))))
+                epp = max(0, min(255, int(req.get("epp", 192))))
                 with _lock:
-                    write_power_limit(pl1, pl2, tau, epb)
-                save_config({"pl1": pl1, "pl2": pl2, "tau": tau, "epb": epb})
-                return self._json(200, {"ok": True})
+                    write_power_limit(pl1, pl2, tau, epp)
+                save_config({"pl1": pl1, "pl2": pl2, "tau": tau, "epp": epp})
+                lim = read_power_limit()
+                return self._json(200, {"ok": True, "applied": {
+                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]}})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
 
         if self._path().startswith("/api/preset"):
             presets = {
-                "省电静音": {"pl1": 35, "pl2": 65, "tau": 8, "epb": 12},
-                "均衡推荐": {"pl1": 65, "pl2": 95, "tau": 28, "epb": 6},
-                "性能优先": {"pl1": 95, "pl2": 130, "tau": 56, "epb": 2},
-                "满血释放": {"pl1": 110, "pl2": 150, "tau": 56, "epb": 0},
+                "省电静音": {"pl1": 35, "pl2": 65, "tau": 32, "epp": 255},
+                "均衡推荐": {"pl1": 45, "pl2": 80, "tau": 16, "epp": 192},
+                "性能优先": {"pl1": 55, "pl2": 90, "tau": 8, "epp": 128},
+                "满血释放": {"pl1": 95, "pl2": 150, "tau": 8, "epp": 0},
             }
             p = presets.get(req.get("name", ""))
             if not p:
@@ -328,9 +423,11 @@ class Handler(BaseHTTPRequestHandler):
                     "error": "MSR 设备不可用：请在 SSH 执行 modprobe msr 后重启本应用"})
             try:
                 with _lock:
-                    write_power_limit(p["pl1"], p["pl2"], p["tau"], p["epb"])
+                    write_power_limit(p["pl1"], p["pl2"], p["tau"], p["epp"])
                 save_config(p)
-                return self._json(200, {"ok": True, "applied": p})
+                lim = read_power_limit()
+                return self._json(200, {"ok": True, "applied": {
+                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]}})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
@@ -341,11 +438,45 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 o = _original
                 with _lock:
-                    write_power_limit(o["pl1"], o["pl2"], o["tau"], o["epb"])
+                    write_power_limit(o["pl1"], o["pl2"], o["tau"],
+                                      o.get("epp", min(255, o.get("epb", 12) * 16)))
                 os.remove(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else None
                 return self._json(200, {"ok": True})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False, "error": str(e)})
+
+        if self._path().startswith("/api/auto"):
+            if not MSR_PATHS:
+                return self._json(503, {"ok": False,
+                    "error": "MSR 设备不可用：请在 SSH 执行 modprobe msr 后重启本应用"})
+            _auto["enabled"] = bool(req.get("enabled"))
+            _auto["hi_since"] = 0.0
+            _auto["lo_since"] = 0.0
+            cfg = load_config()
+            cfg["auto_enabled"] = _auto["enabled"]
+            save_config(cfg)
+            if _auto["enabled"]:
+                _auto["state"] = "idle"
+                _apply_profile(AUTO_IDLE)
+            return self._json(200, {"ok": True, "auto": _auto})
+
+        if self._path().startswith("/api/no_turbo"):
+            try:
+                write_no_turbo(bool(req.get("on")))
+                return self._json(200, {"ok": True, "noTurbo": read_no_turbo()})
+            except (IOError, OSError) as e:
+                return self._json(500, {"ok": False, "error": f"no_turbo 写入失败: {e}"})
+
+        if self._path().startswith("/api/aspm"):
+            p = str(req.get("policy", ""))
+            if p not in read_aspm()["policies"]:
+                return self._json(400, {"ok": False, "error": "未知 ASPM 策略"})
+            try:
+                write_aspm(p)
+                return self._json(200, {"ok": True, "aspm": read_aspm()})
+            except (IOError, OSError) as e:
+                return self._json(500, {"ok": False,
+                    "error": f"ASPM 写入失败（可能需要内核参数 pcie_aspm.policy=... 并重启）: {e}"})
 
         self._json(404, {"ok": False, "error": "not found"})
 
@@ -367,6 +498,12 @@ def main():
               file=sys.stderr)
 
     apply_saved_or_defaults()
+
+    cfg0 = load_config()
+    if cfg0.get("auto_enabled"):
+        _auto["enabled"] = True
+        _auto["state"] = "idle"
+    threading.Thread(target=_auto_loop, daemon=True).start()
 
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
 

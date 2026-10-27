@@ -11,33 +11,38 @@
   h1{font-size:20px;margin-bottom:4px}
   .sub{color:#667;font-size:12px;margin-bottom:14px}
   .live{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px}
-  .stat{flex:1;min-width:130px;background:#f6f8fa;border-radius:8px;padding:12px;text-align:center}
-  .stat b{font-size:24px;display:block}
+  .stat{flex:1;min-width:120px;background:#f6f8fa;border-radius:8px;padding:12px;text-align:center}
+  .stat b{font-size:22px;display:block}
   .stat span{font-size:12px;color:#667}
   .row{display:flex;align-items:center;gap:10px;margin:12px 0}
-  .row label{width:150px;font-size:14px}
+  .row label{width:140px;font-size:14px;flex-shrink:0}
   .row input[type=range]{flex:1}
-  .row .val{width:90px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
-  .row input[type=number]{width:90px;padding:4px 8px;border:1px solid #ccc;border-radius:6px}
+  .row .val{width:80px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
   .presets{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
   button{padding:8px 16px;border:1px solid #1f6feb;background:#fff;color:#1f6feb;border-radius:8px;cursor:pointer;font-size:14px}
   button.pri{background:#1f6feb;color:#fff}
   button:hover{opacity:.9}
+  .switch{display:flex;align-items:center;gap:10px;margin:10px 0;font-size:14px}
+  .switch b{font-size:13px;color:#667}
+  .epp{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .epp button.on{background:#1f6feb;color:#fff}
   .msg{min-height:20px;font-size:13px;margin-top:8px;color:#0a7a0a}
   .msg.err{color:#c00}
   .hint{font-size:12px;color:#8792a2;line-height:1.6;margin-top:10px}
   h2{font-size:15px;margin-bottom:10px;border-left:4px solid #1f6feb;padding-left:8px}
+  select{padding:6px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px}
 </style>
 </head>
 <body>
 
 <div class="card">
   <h1>Intel 功耗控制</h1>
-  <div class="sub">i5-9500 · RAPL MSR 实时调节 · 设置掉电不丢（开机自动恢复）</div>
+  <div class="sub">i5-9500 · RAPL/HWP 实时调节 · 设置掉电不丢（开机自动恢复）</div>
   <div class="live">
     <div class="stat"><b id="sPower">-</b><span>实时封装功耗 W</span></div>
     <div class="stat"><b id="sTemp">-</b><span>最高核温 ℃</span></div>
     <div class="stat"><b id="sFreq">-</b><span>平均频率 GHz</span></div>
+    <div class="stat"><b id="sLoad">-</b><span>系统负载 load1</span></div>
   </div>
 </div>
 
@@ -45,25 +50,43 @@
   <h2>快速预设</h2>
   <div class="presets">
     <button onclick="preset('省电静音')">省电静音 35W</button>
-    <button class="pri" onclick="preset('均衡推荐')">均衡推荐 65W</button>
-    <button onclick="preset('性能优先')">性能优先 95W</button>
-    <button onclick="preset('满血释放')">满血释放 110W</button>
+    <button class="pri" onclick="preset('均衡推荐')">均衡推荐 45W</button>
+    <button onclick="preset('性能优先')">性能优先 55W</button>
+    <button onclick="preset('满血释放')">满血释放 95W</button>
     <button onclick="reset()">恢复默认</button>
   </div>
-  <div class="hint">省电静音适合 7×24 挂机下载；均衡 65W 是 i5-9500 官方 TDP；满血会让 9500 短时冲到 110W+，注意 SFF 机箱散热。</div>
+  <div class="hint">预设按实测校准：省电静音适合挂机；均衡 45W 六核仍可跑 3.5GHz，批量任务只慢 10% 以内；PL2 是突发睿频墙，τ 是允许冲 PL2 的时长（硬件按 2 的幂档位就近取整，应用后界面显示的是实际生效值）。</div>
+</div>
+
+<div class="card">
+  <h2>分时自动</h2>
+  <div class="switch">
+    <button id="autoBtn" onclick="toggleAuto()">开启自动模式</button>
+    <span>状态：<b id="autoState">-</b></span>
+  </div>
+  <div class="switch">
+    <input type="checkbox" id="ntBox" onchange="setNoTurbo(this.checked)">
+    <span>关闭睿频 no_turbo（更省电更凉快，突发性能会下降）</span>
+  </div>
+  <div class="switch">
+    <span>PCIe ASPM 省电策略（约省 1~2W，24 小时生效）：</span>
+    <select id="aspmSel" onchange="setAspm(this.value)"><option value="">-</option></select>
+  </div>
+  <div class="hint">自动模式：空闲（load&lt;0.5 持续 10 分钟）→ 35W 省电档；负载（load&gt;1.5 持续 30 秒）→ 55W 性能档，干活不肉、空闲不费电。睿频关掉后单核锁 3.0GHz。</div>
 </div>
 
 <div class="card">
   <h2>手动调节</h2>
   <div class="row"><label>PL1 持续功耗墙</label><input type="range" id="pl1" min="25" max="150" step="1"><span class="val" id="pl1v"></span></div>
   <div class="row"><label>PL2 睿频功耗墙</label><input type="range" id="pl2" min="25" max="200" step="1"><span class="val" id="pl2v"></span></div>
-  <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0" max="10" step="1"><span class="val" id="tauv"></span></div>
-  <div class="row"><label>能效偏好 EPB</label><input type="range" id="epb" min="0" max="15" step="1"><span class="val" id="epbv"></span></div>
+  <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0" max="11" step="1"><span class="val" id="tauv"></span></div>
+  <div class="epp" id="eppBtns"></div>
+  <div class="hint" style="margin-top:0">能效偏好 EPP（HWP 平台实际生效的旋钮）：performance 最性能 → power 最省电</div>
   <button class="pri" onclick="apply()">应用设置</button>
   <div class="msg" id="msg"></div>
   <div class="hint">
-    PL1：长时间允许的封装功耗（决定多核持续性能）；PL2：短时睿频功耗（决定爆发性能）；τ：允许以 PL2 运行的时间窗口（按常用档位选择，推荐 28 秒）；
-    EPB：0=最高性能 15=最省电。若提示写入失败，说明 HP BIOS 锁定了 MSR，需要在 BIOS 里确认 SpeedShift/功耗墙解锁。
+    PL1：长时间允许的封装功耗；PL2：短时睿频功耗；τ：允许以 PL2 运行的时间窗口（硬件只支持 2 的幂档位，会就近取整）；
+    EPP：0=最高性能 255=最省电（intel_pstate=active 时内核读取的就是它）。若提示写入失败，说明 BIOS 锁定了 MSR。
   </div>
 </div>
 
@@ -71,10 +94,8 @@
 const API_BASE = location.pathname.startsWith("/app/") ? "/app/intel-powerctl" : "";
 
 const $ = id => document.getElementById(id);
-// τ 档位：硬件只支持 2^n × 时间单位，默认按 1/1024s 估算，
-// 首次拿到 status 的 tunit 后重建为硬件真实可存的档位
 const TAU_WANTED = [0.5, 1, 2, 4, 8, 14, 28, 44, 56, 112, 224, 448];
-let TAU_STEPS = [0.5, 1, 2, 4, 8, 14, 28, 44, 56, 112, 224, 448];
+let TAU_STEPS = TAU_WANTED.slice();
 function rebuildTauSteps(tunit){
   const seen = new Set();
   TAU_STEPS = TAU_WANTED
@@ -89,24 +110,36 @@ function rebuildTauSteps(tunit){
 const tauVal = () => TAU_STEPS[$("tau").value];
 const tauNearest = v => TAU_STEPS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
 
-let editing = false;      // 用户正在拖滑块：暂停表单回填，防止被轮询打回原样
-let editTimer = null;
+const EPP_LEVELS = [["performance", 0], ["balance_performance", 128], ["balance_power", 192], ["power", 255]];
+let curEpp = 192;
+function renderEpp(){
+  $("eppBtns").innerHTML = "";
+  EPP_LEVELS.forEach(([name, val]) => {
+    const b = document.createElement("button");
+    b.textContent = name;
+    if (val === curEpp) b.classList.add("on");
+    b.onclick = () => { curEpp = val; renderEpp(); };
+    $("eppBtns").appendChild(b);
+  });
+}
+
+let editing = false, editTimer = null;
 const markEditing = () => {
   editing = true;
   clearTimeout(editTimer);
-  editTimer = setTimeout(() => editing = false, 10000); // 10 秒无操作自动恢复同步
+  editTimer = setTimeout(() => editing = false, 10000);
 };
-["pl1","pl2","tau","epb"].forEach(id => $(id).addEventListener("input", markEditing));
+["pl1","pl2","tau"].forEach(id => $(id).addEventListener("input", markEditing));
 
 const bind = (id) => {
   const el = $(id);
   const show = () => {
     if (id === "tau") $(id + "v").textContent = tauVal() + " 秒";
-    else $(id + "v").textContent = el.value + (id === "epb" ? "" : " W");
+    else $(id + "v").textContent = el.value + " W";
   };
   el.addEventListener("input", show); show();
 };
-["pl1","pl2","tau","epb"].forEach(bind);
+["pl1","pl2","tau"].forEach(bind);
 
 function msg(text, err){
   const m = $("msg");
@@ -122,27 +155,52 @@ async function refresh(){
     $("sPower").textContent = d.power ?? "-";
     $("sTemp").textContent  = d.temp ?? "-";
     $("sFreq").textContent  = d.freq ?? "-";
-    // 用户拖动期间不回填表单，避免滑块被轮询打回原样
-    if(editing || ["pl1","pl2","tau","epb"].includes(document.activeElement?.id)) return;
+    $("sLoad").textContent  = d.load ?? "-";
+    if (d.tunit) rebuildTauSteps(d.tunit);
+    if (d.auto){
+      $("autoState").textContent = d.auto.enabled ? ("已开启 · 当前 " + (d.auto.state === "perf" ? "性能档 55W" : d.auto.state === "idle" ? "空闲档 35W" : "-")) : "未开启";
+      $("autoBtn").textContent = d.auto.enabled ? "关闭自动模式" : "开启自动模式";
+      $("autoBtn").className = d.auto.enabled ? "pri" : "";
+    }
+    if (d.noTurbo !== null && d.noTurbo !== undefined) $("ntBox").checked = d.noTurbo;
+    if (d.aspm && d.aspm.policies.length){
+      const sel = $("aspmSel");
+      if (sel.options.length <= 1){
+        d.aspm.policies.forEach(p => {
+          const o = document.createElement("option");
+          o.value = p; o.textContent = p;
+          sel.appendChild(o);
+        });
+      }
+      sel.value = d.aspm.current || "";
+    }
+    if(editing || ["pl1","pl2","tau"].includes(document.activeElement?.id)) return;
     $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
     $("pl2").value = d.pl2; $("pl2").dispatchEvent(new Event("input"));
-    if (d.tunit) rebuildTauSteps(d.tunit);
     $("tau").value = TAU_STEPS.indexOf(tauNearest(d.tau)); $("tau").dispatchEvent(new Event("input"));
-    $("epb").value = d.epb; $("epb").dispatchEvent(new Event("input"));
+    curEpp = d.epp ?? curEpp; renderEpp();
   }catch(e){ msg("无法连接服务", true); }
 }
 
 async function preset(name){
   const r = await fetch(API_BASE + "/api/preset", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
   const d = await r.json();
-  if(d.ok){ msg("已应用预设：" + name); editing = false; refresh(); } else msg(d.error, true);
+  if(d.ok){
+    const a = d.applied || {};
+    msg(`已应用预设：${name}（实际生效 PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s）`);
+    editing = false; refresh();
+  } else msg(d.error, true);
 }
 
 async function apply(){
-  const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:tauVal(), epb:+$("epb").value};
+  const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:tauVal(), epp:curEpp};
   const r = await fetch(API_BASE + "/api/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const d = await r.json();
-  if(d.ok){ msg("已应用并保存（重启后自动恢复）"); editing = false; refresh(); } else msg(d.error, true);
+  if(d.ok){
+    const a = d.applied || {};
+    msg(`已应用并保存（重启后自动恢复）——实际生效：PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s`);
+    editing = false; refresh();
+  } else msg(d.error, true);
 }
 
 async function reset(){
@@ -151,6 +209,27 @@ async function reset(){
   if(d.ok){ msg("已还原到启动时的原始值"); editing = false; refresh(); } else msg(d.error, true);
 }
 
+async function toggleAuto(){
+  const on = !($("autoBtn").textContent.startsWith("关闭"));
+  const r = await fetch(API_BASE + "/api/auto", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled:on})});
+  const d = await r.json();
+  if(d.ok){ msg(on ? "自动模式已开启：空闲 35W / 负载自动 55W" : "自动模式已关闭"); refresh(); } else msg(d.error, true);
+}
+
+async function setNoTurbo(on){
+  const r = await fetch(API_BASE + "/api/no_turbo", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({on})});
+  const d = await r.json();
+  if(d.ok){ msg(on ? "已关闭睿频" : "已开启睿频"); } else msg(d.error, true);
+}
+
+async function setAspm(p){
+  if(!p) return;
+  const r = await fetch(API_BASE + "/api/aspm", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({policy:p})});
+  const d = await r.json();
+  if(d.ok){ msg("ASPM 策略已设为 " + p); } else msg(d.error, true);
+}
+
+renderEpp();
 refresh(); setInterval(refresh, 2000);
 </script>
 </body>
