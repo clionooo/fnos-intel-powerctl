@@ -1,0 +1,16 @@
+appname = intel-powerctl
+version = 1.0.0
+display_name = Intel 功耗控制
+desc = 面向 Intel 平台的 CPU 功耗控制工具（飞牛 NAS 版）：调整 PL1/PL2 功耗墙、时间窗与能效模式，实时显示封装功耗与温度。适用于 i5-9500 等 Coffee Lake 及以后支持 RAPL MSR 的处理器。
+maintainer = clionooo
+maintainer_url = https://github.com/clionooo
+distributor = clionooo
+distributor_url = https://github.com/clionooo
+source = thirdparty
+platform = x86
+desktop_uidir = ui
+desktop_applaunchname = intel-powerctl.main
+ctl_stop = true
+checkport = true
+os_min_version = 1.0.0
+changelog = 1.0.0 首个版本：PL1/PL2/时间窗调节、能效模式、预设方案、实时功耗温度显示、开机自动恢复

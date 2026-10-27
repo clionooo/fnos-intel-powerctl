@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Intel 功耗控制</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#f4f6f9;color:#24292f;padding:20px}
+  .card{background:#fff;border:1px solid #e1e4e8;border-radius:10px;padding:18px;margin-bottom:16px;max-width:720px;margin-left:auto;margin-right:auto}
+  h1{font-size:20px;margin-bottom:4px}
+  .sub{color:#667;font-size:12px;margin-bottom:14px}
+  .live{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+  .stat{flex:1;min-width:130px;background:#f6f8fa;border-radius:8px;padding:12px;text-align:center}
+  .stat b{font-size:24px;display:block}
+  .stat span{font-size:12px;color:#667}
+  .row{display:flex;align-items:center;gap:10px;margin:12px 0}
+  .row label{width:150px;font-size:14px}
+  .row input[type=range]{flex:1}
+  .row .val{width:90px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+  .row input[type=number]{width:90px;padding:4px 8px;border:1px solid #ccc;border-radius:6px}
+  .presets{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  button{padding:8px 16px;border:1px solid #1f6feb;background:#fff;color:#1f6feb;border-radius:8px;cursor:pointer;font-size:14px}
+  button.pri{background:#1f6feb;color:#fff}
+  button:hover{opacity:.9}
+  .msg{min-height:20px;font-size:13px;margin-top:8px;color:#0a7a0a}
+  .msg.err{color:#c00}
+  .hint{font-size:12px;color:#8792a2;line-height:1.6;margin-top:10px}
+  h2{font-size:15px;margin-bottom:10px;border-left:4px solid #1f6feb;padding-left:8px}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Intel 功耗控制</h1>
+  <div class="sub">i5-9500 · RAPL MSR 实时调节 · 设置掉电不丢（开机自动恢复）</div>
+  <div class="live">
+    <div class="stat"><b id="sPower">-</b><span>实时封装功耗 W</span></div>
+    <div class="stat"><b id="sTemp">-</b><span>最高核温 ℃</span></div>
+    <div class="stat"><b id="sFreq">-</b><span>平均频率 GHz</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>快速预设</h2>
+  <div class="presets">
+    <button onclick="preset('省电静音')">省电静音 35W</button>
+    <button class="pri" onclick="preset('均衡推荐')">均衡推荐 65W</button>
+    <button onclick="preset('性能优先')">性能优先 95W</button>
+    <button onclick="preset('满血释放')">满血释放 110W</button>
+    <button onclick="reset()">恢复默认</button>
+  </div>
+  <div class="hint">省电静音适合 7×24 挂机下载；均衡 65W 是 i5-9500 官方 TDP；满血会让 9500 短时冲到 110W+，注意 SFF 机箱散热。</div>
+</div>
+
+<div class="card">
+  <h2>手动调节</h2>
+  <div class="row"><label>PL1 持续功耗墙</label><input type="range" id="pl1" min="25" max="150" step="1"><span class="val" id="pl1v"></span></div>
+  <div class="row"><label>PL2 睿频功耗墙</label><input type="range" id="pl2" min="25" max="200" step="1"><span class="val" id="pl2v"></span></div>
+  <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0.05" max="448" step="0.05"><span class="val" id="tauv"></span></div>
+  <div class="row"><label>能效偏好 EPB</label><input type="range" id="epb" min="0" max="15" step="1"><span class="val" id="epbv"></span></div>
+  <button class="pri" onclick="apply()">应用设置</button>
+  <div class="msg" id="msg"></div>
+  <div class="hint">
+    PL1：长时间允许的封装功耗（决定多核持续性能）；PL2：短时睿频功耗（决定爆发性能）；τ：允许以 PL2 运行的时间窗口；
+    EPB：0=最高性能 15=最省电。若提示写入失败，说明 HP BIOS 锁定了 MSR，需要在 BIOS 里确认 SpeedShift/功耗墙解锁。
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const bind = (id) => {
+  const el = $(id);
+  const show = () => $(id + "v").textContent = el.value + (id==="epb"?"":" W");
+  el.addEventListener("input", show); show();
+};
+["pl1","pl2","tau","epb"].forEach(bind);
+
+function msg(text, err){
+  const m = $("msg");
+  m.textContent = text;
+  m.className = "msg" + (err ? " err" : "");
+}
+
+async function refresh(){
+  try{
+    const r = await fetch("/api/status");
+    const d = await r.json();
+    if(!d.ok){ msg(d.error, true); return; }
+    $("sPower").textContent = d.power ?? "-";
+    $("sTemp").textContent  = d.temp ?? "-";
+    $("sFreq").textContent  = d.freq ?? "-";
+    // 表单跟随当前值（避免正在拖动时被打断）
+    if(!document.activeElement || !["pl1","pl2","tau","epb"].includes(document.activeElement.id)){
+      $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
+      $("pl2").value = d.pl2; $("pl2").dispatchEvent(new Event("input"));
+      $("tau").value = d.tau; $("tau").dispatchEvent(new Event("input"));
+      $("epb").value = d.epb; $("epb").dispatchEvent(new Event("input"));
+    }
+  }catch(e){ msg("无法连接服务", true); }
+}
+
+async function preset(name){
+  const r = await fetch("/api/preset", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
+  const d = await r.json();
+  if(d.ok){ msg("已应用预设：" + name); refresh(); } else msg(d.error, true);
+}
+
+async function apply(){
+  const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:+$("tau").value, epb:+$("epb").value};
+  const r = await fetch("/api/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const d = await r.json();
+  if(d.ok){ msg("已应用并保存（重启后自动恢复）"); refresh(); } else msg(d.error, true);
+}
+
+async function reset(){
+  const r = await fetch("/api/reset", {method:"POST"});
+  const d = await r.json();
+  if(d.ok){ msg("已还原到启动时的原始值"); refresh(); } else msg(d.error, true);
+}
+
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>

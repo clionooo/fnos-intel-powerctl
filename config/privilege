@@ -1,0 +1,2 @@
+# 运行身份：写 MSR 寄存器（功耗墙）必须 root 权限
+run-as=root

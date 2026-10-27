@@ -1,0 +1,1 @@
+{"status": "ok", "check": {"type": "http", "port": 9527, "path": "/api/status"}}

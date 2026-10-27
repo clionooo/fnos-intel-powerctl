@@ -1,0 +1,5 @@
+[intel-powerctl.main]
+title = "Intel 功耗控制"
+icon = "images/icon_64.png"
+url = "/app/intel-powerctl/index.html"
+openInNewWindow = true

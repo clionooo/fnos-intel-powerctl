@@ -1,0 +1,58 @@
+#!/bin/bash
+# ============================================================
+# intel-powerctl 应用生命周期入口（飞牛应用中心调用）
+# 用法: cmd/main <start|stop|status|restart>
+# 职责:
+#   start  -> 加载 msr 内核模块，应用已保存的功耗配置，启动本地 Web 服务
+#   stop   -> 停止 Web 服务（已生效的功耗设置保留，不回滚）
+#   status -> 检查服务端口是否存活
+# ============================================================
+APP_NAME="intel-powerctl"
+SERVER="app/server/server.py"
+PID_FILE="/tmp/${APP_NAME}.pid"
+PORT=9527
+
+# fnOS 安装根目录：应用安装后的路径由环境变量传入，兜底用相对路径
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+do_start() {
+    # 1. 加载 msr 模块（写功耗墙必须通过 /dev/cpu/*/msr）
+    if ! ls /dev/cpu/0/msr >/dev/null 2>&1; then
+        modprobe msr 2>/dev/null || echo "[warn] modprobe msr 失败，可能需要重启后重试"
+    fi
+
+    # 2. 启动 Web 服务（server.py 自行应用上次保存的配置）
+    cd "$APP_DIR"
+    nohup python3 "$SERVER" --port "$PORT" >>"/tmp/${APP_NAME}.log" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "[start] ${APP_NAME} 已启动，端口 ${PORT}"
+    return 0
+}
+
+do_stop() {
+    if [ -f "$PID_FILE" ]; then
+        kill "$(cat "$PID_FILE")" 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
+    # 兜底清理残留进程
+    pkill -f "server.py --port ${PORT}" 2>/dev/null
+    echo "[stop] ${APP_NAME} 已停止（功耗设置保持当前值不变）"
+    return 0
+}
+
+do_status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "running"
+        return 0
+    fi
+    echo "stopped"
+    return 1
+}
+
+case "$1" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    status)  do_status ;;
+    restart) do_stop; sleep 1; do_start ;;
+    *) echo "用法: $0 {start|stop|status|restart}"; exit 1 ;;
+esac
