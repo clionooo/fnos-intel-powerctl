@@ -143,9 +143,16 @@ def write_power_limit(pl1: float, pl2: float, tau: float, epb: int):
         _msr_write(msr, MSR_ENERGY_PERF_BIAS, (old_epb & ~0xF) | (epb & 0xF))
 
 
+def _rapl_energy_unit() -> float:
+    """能量单位 = 1/2^EU，EU 取 0x606 bits 12:8（与功率单位不同！）"""
+    v = _msr_read(MSR_PATHS[0], MSR_RAPL_POWER_UNIT)
+    eu = (v >> 8) & 0x1F
+    return 2.0 ** (-eu)
+
+
 def read_live_power(sample_s=0.3) -> float:
     """两次读能耗计数器求差 => 实时封装功耗（瓦）"""
-    unit, _ = _rapl_units()
+    unit = _rapl_energy_unit()
     e1 = _msr_read(MSR_PATHS[0], MSR_PKG_ENERGY_STATUS) & 0xFFFFFFFF
     time.sleep(sample_s)
     e2 = _msr_read(MSR_PATHS[0], MSR_PKG_ENERGY_STATUS) & 0xFFFFFFFF

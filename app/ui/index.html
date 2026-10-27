@@ -73,7 +73,7 @@ const API_BASE = location.pathname.startsWith("/app/") ? "/app/intel-powerctl" :
 const $ = id => document.getElementById(id);
 const bind = (id) => {
   const el = $(id);
-  const show = () => $(id + "v").textContent = el.value + (id==="epb"?"":" W");
+  const show = () => $(id + "v").textContent = el.value + (id==="epb" ? "" : id==="tau" ? " 秒" : " W");
   el.addEventListener("input", show); show();
 };
 ["pl1","pl2","tau","epb"].forEach(bind);

@@ -1,5 +1,5 @@
 appname               = intel-powerctl
-version               = 1.0.2
+version               = 1.0.3
 display_name          = Intel 功耗控制
 desc                  = <p>Intel 功耗控制可读取处理器功耗墙（PL1/PL2）、实时封装功耗和温度，设置或恢复功耗限制与能效模式（EPB）。</p><h3>支持的 CPU 类型</h3><p>• Intel Core Haswell（第 4 代）及以后的处理器<br>• 已在 HP EliteDesk 800 G5 SFF（i5-9500）上适配验证<br>• 需要 CPU 支持 RAPL MSR（0x610 功耗墙 / 0x611 能耗计数器）</p><p>若 BIOS 锁定 MSR 写入（MSRLock），调节功能会返回明确错误提示。</p>
 platform              = x86
@@ -13,4 +13,4 @@ desktop_applaunchname = intel-powerctl.Application
 ctl_stop              = true
 checkport             = false
 os_min_version        = 1.1.3100
-changelog             = 1.0.2 修复安装包结构（app.tgz 标准格式），适配飞牛网关 socket，Web 端口改为 59500
+changelog             = 1.0.3 修复安装包结构（app.tgz 标准格式），适配飞牛网关 socket，Web 端口改为 59500
