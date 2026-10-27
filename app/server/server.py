@@ -25,6 +25,7 @@ import argparse
 import glob
 import json
 import os
+import socketserver
 import struct
 import sys
 import threading
@@ -36,6 +37,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 CONFIG_PATH = "/var/lib/intel-powerctl/config.json"
 UI_DIR = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "ui"))
+# 飞牛网关反代前缀：桌面图标通过 /app/intel-powerctl 转发到 app.sock
+GATEWAY_PREFIX = "/app/intel-powerctl"
 
 # ------------------------------------------------------------------
 # MSR 寄存器地址（Intel SDM Vol.4 定义）
@@ -221,6 +224,13 @@ def apply_saved_or_defaults():
 # ------------------------------------------------------------------
 # HTTP 服务
 class Handler(BaseHTTPRequestHandler):
+    def _path(self):
+        """去掉网关前缀，兼容 飞牛桌面(/app/intel-powerctl/...) 与 直连端口 两种访问"""
+        p = self.path.split("?")[0]
+        if p.startswith(GATEWAY_PREFIX):
+            p = p[len(GATEWAY_PREFIX):] or "/"
+        return p
+
     def _json(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -246,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f.read())
 
     def do_GET(self):
-        if self.path.startswith("/api/status"):
+        if self._path().startswith("/api/status"):
             if not MSR_PATHS:
                 return self._json(503, {"ok": False, "msr": False,
                     "error": "MSR 设备不可用：请在 SSH 执行 modprobe msr 后重启本应用"})
@@ -262,10 +272,10 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except (IOError, OSError) as e:
                 self._json(500, {"ok": False, "error": f"MSR 读取失败: {e}"})
-        elif self.path.startswith("/api/original"):
+        elif self._path().startswith("/api/original"):
             self._json(200, {"ok": True, "original": _original})
         else:
-            self._static(self.path.split("?")[0])
+            self._static(self._path())
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -274,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._json(400, {"ok": False, "error": "请求格式错误"})
 
-        if self.path.startswith("/api/apply"):
+        if self._path().startswith("/api/apply"):
             if not MSR_PATHS:
                 return self._json(503, {"ok": False,
                     "error": "MSR 设备不可用：请在 SSH 执行 modprobe msr 后重启本应用"})
@@ -291,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
 
-        if self.path.startswith("/api/preset"):
+        if self._path().startswith("/api/preset"):
             presets = {
                 "省电静音": {"pl1": 35, "pl2": 65, "tau": 8, "epb": 12},
                 "均衡推荐": {"pl1": 65, "pl2": 95, "tau": 28, "epb": 6},
@@ -313,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
 
-        if self.path.startswith("/api/reset"):
+        if self._path().startswith("/api/reset"):
             if not _original:
                 return self._json(400, {"ok": False, "error": "没有可还原的原始值"})
             try:
@@ -333,7 +343,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=9527)
+    ap.add_argument("--port", type=int, default=59500)
+    ap.add_argument("--socket", default=None,
+                    help="unix socket 路径（飞牛网关反代用）")
     args = ap.parse_args()
 
     # 降级模式：没有 MSR 设备时服务仍然启动，前端显示错误提示
@@ -345,6 +357,22 @@ def main():
     apply_saved_or_defaults()
 
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+
+    # 飞牛桌面图标走网关 unix socket 反代（与 TCP 端口共享同一 Handler）
+    if args.socket:
+        class UnixHTTPServer(socketserver.ThreadingMixIn,
+                             socketserver.UnixStreamServer):
+            daemon_threads = True
+        try:
+            if os.path.exists(args.socket):
+                os.remove(args.socket)
+            usrv = UnixHTTPServer(args.socket, Handler)
+            t = threading.Thread(target=usrv.serve_forever, daemon=True)
+            t.start()
+            print(f"[start] 网关 socket 已监听: {args.socket}")
+        except OSError as e:
+            print(f"[warn] unix socket 监听失败: {e}", file=sys.stderr)
+
     print(f"[start] intel-powerctl 服务已启动，端口 {args.port}，CPU 数 {len(MSR_PATHS)}")
     srv.serve_forever()
 

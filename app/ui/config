@@ -1,5 +1,17 @@
-[intel-powerctl.main]
-title = "Intel 功耗控制"
-icon = "images/icon_64.png"
-url = "/app/intel-powerctl/index.html"
-openInNewWindow = true
+{
+  ".url": {
+    "intel-powerctl.Application": {
+      "title": "Intel 功耗控制",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/intel-powerctl",
+      "gatewaySocket": "app.sock",
+      "url": "/app/intel-powerctl",
+      "allUsers": false,
+      "control": {
+        "accessPerm": "editable"
+      }
+    }
+  }
+}

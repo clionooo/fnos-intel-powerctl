@@ -1,0 +1,5 @@
+#!/bin/bash
+
+### fnOS lifecycle hook: uninstall_init
+
+exit 0

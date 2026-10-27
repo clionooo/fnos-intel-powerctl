@@ -1,0 +1,5 @@
+#!/bin/bash
+
+### fnOS lifecycle hook: install_callback
+
+exit 0

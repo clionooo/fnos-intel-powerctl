@@ -68,6 +68,8 @@
 </div>
 
 <script>
+const API_BASE = location.pathname.startsWith("/app/") ? "/app/intel-powerctl" : "";
+
 const $ = id => document.getElementById(id);
 const bind = (id) => {
   const el = $(id);
@@ -84,7 +86,7 @@ function msg(text, err){
 
 async function refresh(){
   try{
-    const r = await fetch("/api/status");
+    const r = await fetch(API_BASE + "/api/status");
     const d = await r.json();
     if(!d.ok){ msg(d.error, true); return; }
     $("sPower").textContent = d.power ?? "-";
@@ -101,14 +103,14 @@ async function refresh(){
 }
 
 async function preset(name){
-  const r = await fetch("/api/preset", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
+  const r = await fetch(API_BASE + "/api/preset", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
   const d = await r.json();
   if(d.ok){ msg("已应用预设：" + name); refresh(); } else msg(d.error, true);
 }
 
 async function apply(){
   const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:+$("tau").value, epb:+$("epb").value};
-  const r = await fetch("/api/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const r = await fetch(API_BASE + "/api/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const d = await r.json();
   if(d.ok){ msg("已应用并保存（重启后自动恢复）"); refresh(); } else msg(d.error, true);
 }

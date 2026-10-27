@@ -37,7 +37,7 @@ sudo modprobe msr
 
 （如需开机自动加载：`echo msr | sudo tee /etc/modules-load.d/msr.conf`）
 
-3. 打开应用 → Web 界面默认端口 **9527**
+3. 打开应用 → Web 界面默认端口 **59500**
 
 ## API
 

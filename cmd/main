@@ -1,58 +1,99 @@
 #!/bin/bash
+set -u
 # ============================================================
 # intel-powerctl 应用生命周期入口（飞牛应用中心调用）
-# 用法: cmd/main <start|stop|status|restart>
-# 职责:
-#   start  -> 加载 msr 内核模块，应用已保存的功耗配置，启动本地 Web 服务
+#   start  -> 加载 msr 内核模块，启动 Web 服务（TCP 59500 + 网关 socket）
 #   stop   -> 停止 Web 服务（已生效的功耗设置保留，不回滚）
-#   status -> 检查服务端口是否存活
+#   status -> 进程存活检查
 # ============================================================
-APP_NAME="intel-powerctl"
-SERVER="app/server/server.py"
-PID_FILE="/tmp/${APP_NAME}.pid"
-PORT=9527
+APPNAME="intel-powerctl"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APPDEST="${TRIM_APPDEST:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PKGVAR="${TRIM_PKGVAR:-${APPDEST}/var}"
+LOG_FILE="${PKGVAR}/info.log"
+PID_FILE="${PKGVAR}/app.pid"
+SOCKET="${APPDEST}/app.sock"
+DAEMON="${APPDEST}/server/server.py"
+PORT=59500
+PYTHON="$(command -v python3 || echo /usr/bin/python3)"
 
-# fnOS 安装根目录：应用安装后的路径由环境变量传入，兜底用相对路径
-APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$PKGVAR"
 
-do_start() {
-    # 1. 加载 msr 模块（写功耗墙必须通过 /dev/cpu/*/msr）
-    if ! ls /dev/cpu/0/msr >/dev/null 2>&1; then
-        modprobe msr 2>/dev/null || echo "[warn] modprobe msr 失败，可能需要重启后重试"
-    fi
-
-    # 2. 启动 Web 服务（server.py 自行应用上次保存的配置）
-    cd "$APP_DIR"
-    nohup python3 "$SERVER" --port "$PORT" >>"/tmp/${APP_NAME}.log" 2>&1 &
-    echo $! > "$PID_FILE"
-    echo "[start] ${APP_NAME} 已启动，端口 ${PORT}"
-    return 0
-}
-
-do_stop() {
-    if [ -f "$PID_FILE" ]; then
-        kill "$(cat "$PID_FILE")" 2>/dev/null
-        rm -f "$PID_FILE"
-    fi
-    # 兜底清理残留进程
-    pkill -f "server.py --port ${PORT}" 2>/dev/null
-    echo "[stop] ${APP_NAME} 已停止（功耗设置保持当前值不变）"
-    return 0
-}
-
-do_status() {
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        echo "running"
+running_pid() {
+    [ -r "$PID_FILE" ] || return 1
+    local pid
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null \
+        && [ -r "/proc/$pid/cmdline" ] \
+        && tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq -- "$DAEMON"; then
+        printf '%s' "$pid"
         return 0
     fi
-    echo "stopped"
+    rm -f "$PID_FILE"
     return 1
 }
 
-case "$1" in
-    start)   do_start ;;
-    stop)    do_stop ;;
-    status)  do_status ;;
-    restart) do_stop; sleep 1; do_start ;;
-    *) echo "用法: $0 {start|stop|status|restart}"; exit 1 ;;
+start_process() {
+    if pid="$(running_pid)"; then
+        echo "$APPNAME: already running (pid $pid)"
+        return 0
+    fi
+    [ -r "$DAEMON" ] || { echo "$APPNAME: daemon missing: $DAEMON" >&2; return 1; }
+    [ -x "$PYTHON" ] || { echo "$APPNAME: python3 is required" >&2; return 1; }
+
+    # 写功耗墙必须通过 /dev/cpu/*/msr
+    if ! ls /dev/cpu/0/msr >/dev/null 2>&1; then
+        modprobe msr 2>/dev/null \
+            || echo "$APPNAME: modprobe msr 失败，UI 可打开但无法读写功耗" >&2
+    fi
+
+    rm -f "$SOCKET"
+    : > "$LOG_FILE"
+    nohup "$PYTHON" "$DAEMON" \
+        --port "$PORT" \
+        --socket "$SOCKET" \
+        >> "$LOG_FILE" 2>&1 &
+    local newpid=$!
+    echo "$newpid" > "$PID_FILE"
+
+    # 等待网关 socket 就绪
+    local count=0
+    while [ ! -S "$SOCKET" ] && [ "$count" -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+        kill -0 "$newpid" 2>/dev/null || break
+    done
+    if [ ! -S "$SOCKET" ] && ! kill -0 "$newpid" 2>/dev/null; then
+        echo "$APPNAME: gateway socket did not start" >&2
+        return 1
+    fi
+    echo "$APPNAME: started (pid $newpid, port $PORT)"
+    return 0
+}
+
+stop_process() {
+    local pid
+    if ! pid="$(running_pid)"; then
+        rm -f "$SOCKET"
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    local count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 15 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE" "$SOCKET"
+    echo "$APPNAME: stopped（功耗设置保持当前值不变）"
+    return 0
+}
+
+case "${1:-}" in
+    start) start_process ;;
+    stop) stop_process ;;
+    status) running_pid >/dev/null && exit 0 || exit 3 ;;
+    *) exit 1 ;;
 esac
