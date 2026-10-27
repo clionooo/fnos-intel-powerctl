@@ -88,12 +88,16 @@ def _raw_to_watts(raw: int, unit: float) -> float:
 
 
 def _tau_to_raw(seconds: float, unit: float) -> int:
-    # 时间窗编码：raw = 2^n * time_unit，n 为 5bit（0~31）
-    n = 0
+    # 时间窗编码：raw = 2^n * time_unit（硬件只支持 2 的幂档位），就近取整
     val = seconds / unit
-    while n < 31 and (2 ** (n + 1)) <= val:
-        n += 1
-    return n
+    n = 0
+    best = 0
+    best_diff = float("inf")
+    for n in range(32):
+        diff = abs(2.0 ** n - val)
+        if diff < best_diff:
+            best, best_diff = n, diff
+    return best
 
 
 def _raw_to_tau(n: int, unit: float) -> float:
@@ -117,6 +121,7 @@ def read_power_limit() -> dict:
         "pl2": round(_raw_to_watts(pl2_raw, unit), 1),
         "pl2Enabled": pl2_on,
         "tau": round(_raw_to_tau(tau_n, tunit), 2),
+        "tunit": tunit,
         "epb": _msr_read(MSR_PATHS[0], MSR_ENERGY_PERF_BIAS) & 0xF,
     }
 
