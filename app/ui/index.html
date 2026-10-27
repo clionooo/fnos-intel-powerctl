@@ -57,12 +57,12 @@
   <h2>手动调节</h2>
   <div class="row"><label>PL1 持续功耗墙</label><input type="range" id="pl1" min="25" max="150" step="1"><span class="val" id="pl1v"></span></div>
   <div class="row"><label>PL2 睿频功耗墙</label><input type="range" id="pl2" min="25" max="200" step="1"><span class="val" id="pl2v"></span></div>
-  <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0.05" max="448" step="0.05"><span class="val" id="tauv"></span></div>
+  <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0" max="10" step="1"><span class="val" id="tauv"></span></div>
   <div class="row"><label>能效偏好 EPB</label><input type="range" id="epb" min="0" max="15" step="1"><span class="val" id="epbv"></span></div>
   <button class="pri" onclick="apply()">应用设置</button>
   <div class="msg" id="msg"></div>
   <div class="hint">
-    PL1：长时间允许的封装功耗（决定多核持续性能）；PL2：短时睿频功耗（决定爆发性能）；τ：允许以 PL2 运行的时间窗口；
+    PL1：长时间允许的封装功耗（决定多核持续性能）；PL2：短时睿频功耗（决定爆发性能）；τ：允许以 PL2 运行的时间窗口（按常用档位选择，推荐 28 秒）；
     EPB：0=最高性能 15=最省电。若提示写入失败，说明 HP BIOS 锁定了 MSR，需要在 BIOS 里确认 SpeedShift/功耗墙解锁。
   </div>
 </div>
@@ -71,9 +71,26 @@
 const API_BASE = location.pathname.startsWith("/app/") ? "/app/intel-powerctl" : "";
 
 const $ = id => document.getElementById(id);
+// τ 按常用档位选择，避免线性滑块 0.05~448 难以精确调到 28
+const TAU_STEPS = [0.5, 1, 2, 4, 8, 14, 28, 44, 56, 112, 224, 448];
+const tauVal = () => TAU_STEPS[$("tau").value];
+const tauNearest = v => TAU_STEPS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+
+let editing = false;      // 用户正在拖滑块：暂停表单回填，防止被轮询打回原样
+let editTimer = null;
+const markEditing = () => {
+  editing = true;
+  clearTimeout(editTimer);
+  editTimer = setTimeout(() => editing = false, 10000); // 10 秒无操作自动恢复同步
+};
+["pl1","pl2","tau","epb"].forEach(id => $(id).addEventListener("input", markEditing));
+
 const bind = (id) => {
   const el = $(id);
-  const show = () => $(id + "v").textContent = el.value + (id==="epb" ? "" : id==="tau" ? " 秒" : " W");
+  const show = () => {
+    if (id === "tau") $(id + "v").textContent = tauVal() + " 秒";
+    else $(id + "v").textContent = el.value + (id === "epb" ? "" : " W");
+  };
   el.addEventListener("input", show); show();
 };
 ["pl1","pl2","tau","epb"].forEach(bind);
@@ -92,33 +109,32 @@ async function refresh(){
     $("sPower").textContent = d.power ?? "-";
     $("sTemp").textContent  = d.temp ?? "-";
     $("sFreq").textContent  = d.freq ?? "-";
-    // 表单跟随当前值（避免正在拖动时被打断）
-    if(!document.activeElement || !["pl1","pl2","tau","epb"].includes(document.activeElement.id)){
-      $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
-      $("pl2").value = d.pl2; $("pl2").dispatchEvent(new Event("input"));
-      $("tau").value = d.tau; $("tau").dispatchEvent(new Event("input"));
-      $("epb").value = d.epb; $("epb").dispatchEvent(new Event("input"));
-    }
+    // 用户拖动期间不回填表单，避免滑块被轮询打回原样
+    if(editing || ["pl1","pl2","tau","epb"].includes(document.activeElement?.id)) return;
+    $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
+    $("pl2").value = d.pl2; $("pl2").dispatchEvent(new Event("input"));
+    $("tau").value = TAU_STEPS.indexOf(tauNearest(d.tau)); $("tau").dispatchEvent(new Event("input"));
+    $("epb").value = d.epb; $("epb").dispatchEvent(new Event("input"));
   }catch(e){ msg("无法连接服务", true); }
 }
 
 async function preset(name){
   const r = await fetch(API_BASE + "/api/preset", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
   const d = await r.json();
-  if(d.ok){ msg("已应用预设：" + name); refresh(); } else msg(d.error, true);
+  if(d.ok){ msg("已应用预设：" + name); editing = false; refresh(); } else msg(d.error, true);
 }
 
 async function apply(){
-  const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:+$("tau").value, epb:+$("epb").value};
+  const body = {pl1:+$("pl1").value, pl2:+$("pl2").value, tau:tauVal(), epb:+$("epb").value};
   const r = await fetch(API_BASE + "/api/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const d = await r.json();
-  if(d.ok){ msg("已应用并保存（重启后自动恢复）"); refresh(); } else msg(d.error, true);
+  if(d.ok){ msg("已应用并保存（重启后自动恢复）"); editing = false; refresh(); } else msg(d.error, true);
 }
 
 async function reset(){
-  const r = await fetch("/api/reset", {method:"POST"});
+  const r = await fetch(API_BASE + "/api/reset", {method:"POST"});
   const d = await r.json();
-  if(d.ok){ msg("已还原到启动时的原始值"); refresh(); } else msg(d.error, true);
+  if(d.ok){ msg("已还原到启动时的原始值"); editing = false; refresh(); } else msg(d.error, true);
 }
 
 refresh(); setInterval(refresh, 2000);
