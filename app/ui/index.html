@@ -152,10 +152,10 @@ async function refresh(){
     const r = await fetch(API_BASE + "/api/status");
     const d = await r.json();
     if(!d.ok){ msg(d.error, true); return; }
-    $("sPower").textContent = d.power ?? "-";
+    $("sPower").textContent = d.power != null ? Math.round(d.power * 10) / 10 : "-";
     $("sTemp").textContent  = d.temp ?? "-";
-    $("sFreq").textContent  = d.freq ?? "-";
-    $("sLoad").textContent  = d.load ?? "-";
+    $("sFreq").textContent  = d.freq != null ? Math.round(d.freq * 100) / 100 : "-";
+    $("sLoad").textContent  = d.load != null ? Math.round(d.load * 10) / 10 : "-";
     if (d.tunit) rebuildTauSteps(d.tunit);
     if (d.auto){
       $("autoState").textContent = d.auto.enabled ? ("已开启 · 当前 " + (d.auto.state === "perf" ? "性能档 55W" : d.auto.state === "idle" ? "空闲档 35W" : "-")) : "未开启";
