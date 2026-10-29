@@ -123,7 +123,8 @@ def read_power_limit() -> dict:
         "pl2Enabled": pl2_on,
         "tau": round(_raw_to_tau(tau_n, tunit), 2),
         "tunit": tunit,
-        "epp": _msr_read(MSR_PATHS[0], MSR_HWP_REQUEST) & 0xFF,
+        # EPP 在 bit 31:24；bit 7:0 是 Minimum_Performance，切勿混淆
+        "epp": (_msr_read(MSR_PATHS[0], MSR_HWP_REQUEST) >> 24) & 0xFF,
         "epb": _msr_read(MSR_PATHS[0], MSR_ENERGY_PERF_BIAS) & 0xF,
     }
 
@@ -145,9 +146,14 @@ def write_power_limit(pl1: float, pl2: float, tau: float, epp: int):
         new |= (1 << 47)                          # PL2 enable
         new |= _tau_to_raw(tau, tunit) << 49      # 时间窗
         _msr_write(msr, MSR_PKG_POWER_LIMIT, new)
-        # 能效偏好：EPP 0~255（HWP 平台内核实际读取），同时兼容写 EPB 低 4 位
-        old_epp = _msr_read(msr, MSR_HWP_REQUEST)
-        _msr_write(msr, MSR_HWP_REQUEST, (old_epp & ~0xFF) | (epp & 0xFF))
+        # IA32_HWP_REQUEST(0x774): bit31:24 = EPP，bit23:16 = Desired，
+        # bit15:8 = Maximum_Performance，bit7:0 = Minimum_Performance（不碰，硬件/内核自己管）
+        old_hwp = _msr_read(msr, MSR_HWP_REQUEST)
+        # bit7:0 Minimum_Performance 归 0（旧版把 EPP 误写在这里，会把频率地板钉死）
+        new_hwp = old_hwp & ~0xFF
+        new_hwp = (new_hwp & ~(0xFF << 24)) | ((epp & 0xFF) << 24)
+        _msr_write(msr, MSR_HWP_REQUEST, new_hwp)
+        # 兼容：EPB(0x1FC) 低 4 位，映射 EPP/16
         old_epb = _msr_read(msr, MSR_ENERGY_PERF_BIAS)
         _msr_write(msr, MSR_ENERGY_PERF_BIAS, (old_epb & ~0xF) | ((epp >> 4) & 0xF))
 
@@ -321,6 +327,15 @@ def write_no_turbo(on: bool):
         f.write("1" if on else "0")
 
 
+def _read_hwp_info() -> dict:
+    """诊断用：拆解 IA32_HWP_REQUEST 各字段"""
+    if not MSR_PATHS:
+        return None
+    v = _msr_read(MSR_PATHS[0], MSR_HWP_REQUEST)
+    return {"raw": hex(v), "minPerf": v & 0xFF, "maxPerf": (v >> 8) & 0xFF,
+            "desired": (v >> 16) & 0xFF, "epp": (v >> 24) & 0xFF}
+
+
 def read_aspm() -> dict:
     """解析 /sys/module/pcie_aspm/parameters/policy
     内容形如: default performance [powersave] powersupersave
@@ -402,6 +417,7 @@ class Handler(BaseHTTPRequestHandler):
                     "auto": {"enabled": _auto["enabled"], "state": _auto["state"]},
                     "noTurbo": read_no_turbo(),
                     "aspm": read_aspm(),
+                    "hwp": _read_hwp_info(),
                 })
             except (IOError, OSError) as e:
                 self._json(500, {"ok": False, "error": f"MSR 读取失败: {e}"})
@@ -498,6 +514,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "noTurbo": read_no_turbo()})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False, "error": f"no_turbo 写入失败: {e}"})
+
+        if self._path().startswith("/api/fix_hwp"):
+            if not MSR_PATHS:
+                return self._json(503, {"ok": False, "error": "MSR 设备不可用"})
+            try:
+                fixed = []
+                for msr in MSR_PATHS:
+                    v = _msr_read(msr, MSR_HWP_REQUEST)
+                    bad_min = v & 0xFF
+                    if bad_min:
+                        # 只清 Minimum_Performance，其余位（Max/Desired/EPP）保持
+                        _msr_write(msr, MSR_HWP_REQUEST, v & ~0xFF)
+                        fixed.append({"cpu": msr, "wasMinPerf": bad_min})
+                return self._json(200, {"ok": True, "fixed": fixed,
+                                        "hwp": hex(_msr_read(MSR_PATHS[0], MSR_HWP_REQUEST))})
+            except (IOError, OSError) as e:
+                return self._json(500, {"ok": False, "error": str(e)})
+
+        if self._path().startswith("/api/hwp"):
+            if not MSR_PATHS:
+                return self._json(503, {"ok": False, "error": "MSR 设备不可用"})
+            v = _msr_read(MSR_PATHS[0], MSR_HWP_REQUEST)
+            return self._json(200, {"ok": True, "raw": hex(v),
+                "minPerf": v & 0xFF,
+                "maxPerf": (v >> 8) & 0xFF,
+                "desired": (v >> 16) & 0xFF,
+                "epp": (v >> 24) & 0xFF})
 
         if self._path().startswith("/api/aspm"):
             p = str(req.get("policy", ""))

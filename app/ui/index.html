@@ -91,6 +91,16 @@
   </div>
 </div>
 
+<div class="card">
+  <h2>HWP 寄存器诊断</h2>
+  <div class="hint" style="margin-top:0">
+    IA32_HWP_REQUEST(0x774)：bit7:0 Minimum / bit15:8 Maximum / bit23:16 Desired / <b>bit31:24 EPP</b>。
+    旧版本曾把 EPP 误写到 Minimum_Performance（bit7:0），会把最低频率钉死在高位 —— 下面的「修复」按钮可清除该残留。
+  </div>
+  <div id="hwpBox" style="font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.9;margin:10px 0;background:#f6f8fa;border-radius:8px;padding:10px">-</div>
+  <button onclick="fixHwp()">清除 Minimum_Performance 残留</button>
+</div>
+
 <script>
 const API_BASE = location.pathname.startsWith("/app/") ? "/app/intel-powerctl" : "";
 
@@ -164,6 +174,14 @@ async function refresh(){
       $("autoBtn").className = d.auto.enabled ? "pri" : "";
     }
     if (d.noTurbo !== null && d.noTurbo !== undefined) $("ntBox").checked = d.noTurbo;
+    if (d.hwp){
+      $("hwpBox").innerHTML =
+        "raw = " + d.hwp.raw + "<br>" +
+        "Minimum_Performance (bit7:0)  = " + d.hwp.minPerf + (d.hwp.minPerf ? "  ⚠️ 非 0，可能锁频" : "  ✅") + "<br>" +
+        "Maximum_Performance (bit15:8) = " + d.hwp.maxPerf + "<br>" +
+        "Desired_Performance (bit23:16) = " + d.hwp.desired + "<br>" +
+        "EPP (bit31:24)                = " + d.hwp.epp + (d.hwp.epp === curEpp ? "  ✅ 与所选一致" : "  （当前所选 " + curEpp + "）");
+    }
     if (d.aspm && d.aspm.policies.length){
       const sel = $("aspmSel");
       if (sel.options.length <= 1){
@@ -220,6 +238,15 @@ async function toggleAuto(){
   const r = await fetch(API_BASE + "/api/auto", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled:on})});
   const d = await r.json();
   if(d.ok){ msg(on ? "自动模式已开启：空闲 35W / 负载自动 55W" : "自动模式已关闭"); refresh(); } else msg(d.error, true);
+}
+
+async function fixHwp(){
+  const r = await fetch(API_BASE + "/api/fix_hwp", {method:"POST"});
+  const d = await r.json();
+  if(d.ok){
+    msg(d.fixed.length ? ("已清除 " + d.fixed.length + " 个 CPU 的 Minimum_Performance 残留") : "没有发现残留，寄存器正常");
+    refresh();
+  } else msg(d.error, true);
 }
 
 async function setNoTurbo(on){
