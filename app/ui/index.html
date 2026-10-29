@@ -187,7 +187,7 @@ async function preset(name){
   const d = await r.json();
   if(d.ok){
     const a = d.applied || {};
-    msg(`已应用预设：${name}（实际生效 PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s）`);
+    msg(`已应用预设：${name}（实际生效 PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s）` + (d.autoDisabled ? "，自动模式已关闭" : ""));
     editing = false; refresh();
   } else msg(d.error, true);
 }
@@ -198,7 +198,7 @@ async function apply(){
   const d = await r.json();
   if(d.ok){
     const a = d.applied || {};
-    msg(`已应用并保存（重启后自动恢复）——实际生效：PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s`);
+    msg(`已应用并保存（重启后恢复此手动设置）——实际生效：PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s` + (d.autoDisabled ? "，自动模式已关闭" : ""));
     editing = false; refresh();
   } else msg(d.error, true);
 }

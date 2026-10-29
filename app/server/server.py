@@ -246,6 +246,21 @@ AUTO_PERF = {"pl1": 55, "pl2": 90, "tau": 8,  "epp": 128}
 _auto = {"enabled": False, "state": "-", "hi_since": 0.0, "lo_since": 0.0}
 
 
+def _disable_auto() -> bool:
+    """手动操作时退出自动模式；返回操作前是否处于自动状态"""
+    if not _auto["enabled"]:
+        return False
+    _auto["enabled"] = False
+    _auto["state"] = "-"
+    _auto["hi_since"] = 0.0
+    _auto["lo_since"] = 0.0
+    cfg = load_config()
+    cfg["auto_enabled"] = False
+    save_config(cfg)
+    print("[auto] 手动操作，自动模式已关闭")
+    return True
+
+
 def _loadavg1() -> float:
     try:
         return os.getloadavg()[0]
@@ -400,10 +415,12 @@ class Handler(BaseHTTPRequestHandler):
                 epp = max(0, min(255, int(req.get("epp", 192))))
                 with _lock:
                     write_power_limit(pl1, pl2, tau, epp)
+                was_auto = _disable_auto()
                 save_config({"pl1": pl1, "pl2": pl2, "tau": tau, "epp": epp})
                 lim = read_power_limit()
                 return self._json(200, {"ok": True, "applied": {
-                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]}})
+                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]},
+                    "autoDisabled": was_auto})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
@@ -424,10 +441,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with _lock:
                     write_power_limit(p["pl1"], p["pl2"], p["tau"], p["epp"])
+                was_auto = _disable_auto()
                 save_config(p)
                 lim = read_power_limit()
                 return self._json(200, {"ok": True, "applied": {
-                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]}})
+                    "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]},
+                    "autoDisabled": was_auto})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
