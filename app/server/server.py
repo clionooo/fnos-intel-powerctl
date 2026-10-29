@@ -45,8 +45,9 @@ GATEWAY_PREFIX = "/app/intel-powerctl"
 MSR_RAPL_POWER_UNIT = 0x606   # 功耗/能耗/时间单位
 MSR_PKG_POWER_LIMIT = 0x610   # 封装功耗墙 PL1/PL2
 MSR_PKG_ENERGY_STATUS = 0x611  # 封装能耗累计计数器
-MSR_ENERGY_PERF_BIAS = 0x1FC  # 能效偏好 0~15（HWP 平台上内核不读，兼容性写入）
+MSR_ENERGY_PERF_BIAS = 0x1FC  # 能效偏好 0~15（HWP 平台被硬件忽略，仅读不写）
 MSR_HWP_REQUEST = 0x774      # HWP EPP 0~255（intel_pstate=active 时内核实际使用的能效旋钮）
+MSR_PM_ENABLE = 0x770        # HWP 总开关 bit0（1 = HWP 已启用）
 
 MSR_PATHS = sorted(glob.glob("/dev/cpu/[0-9]*/msr"))
 
@@ -125,7 +126,9 @@ def read_power_limit() -> dict:
         "tunit": tunit,
         # EPP 在 bit 31:24；bit 7:0 是 Minimum_Performance，切勿混淆
         "epp": (_msr_read(MSR_PATHS[0], MSR_HWP_REQUEST) >> 24) & 0xFF,
+        # EPB 仅供展示：HWP 开启后硬件忽略它，内核也只读 EPP
         "epb": _msr_read(MSR_PATHS[0], MSR_ENERGY_PERF_BIAS) & 0xF,
+        "hwpEnabled": hwp_enabled(),
     }
 
 
@@ -153,9 +156,8 @@ def write_power_limit(pl1: float, pl2: float, tau: float, epp: int):
         new_hwp = old_hwp & ~0xFF
         new_hwp = (new_hwp & ~(0xFF << 24)) | ((epp & 0xFF) << 24)
         _msr_write(msr, MSR_HWP_REQUEST, new_hwp)
-        # 兼容：EPB(0x1FC) 低 4 位，映射 EPP/16
-        old_epb = _msr_read(msr, MSR_ENERGY_PERF_BIAS)
-        _msr_write(msr, MSR_ENERGY_PERF_BIAS, (old_epb & ~0xF) | ((epp >> 4) & 0xF))
+        # 注意：不写 EPB(0x1FC)。HWP 开启后该寄存器被硬件忽略，
+        # 内核（intel_pstate active）也只读 EPP；写它只会制造"看起来生效了"的错觉。
 
 
 def _rapl_energy_unit() -> float:
@@ -336,10 +338,24 @@ def _read_hwp_info() -> dict:
             "desired": (v >> 16) & 0xFF, "epp": (v >> 24) & 0xFF}
 
 
+def hwp_enabled() -> bool:
+    """HWP 是否开启：优先看 IA32_PM_ENABLE(0x770) bit0，其次看内核 intel_pstate 状态"""
+    try:
+        if MSR_PATHS and (_msr_read(MSR_PATHS[0], MSR_PM_ENABLE) & 1):
+            return True
+    except (IOError, OSError):
+        pass
+    try:
+        st = open("/sys/devices/system/cpu/intel_pstate/status").read().strip()
+        return st == "active"
+    except (IOError, OSError):
+        return False
+
+
 def read_aspm() -> dict:
     """解析 /sys/module/pcie_aspm/parameters/policy
     内容形如: default performance [powersave] powersupersave
-    当前生效值用方括号标记"""
+    当前生效值用方括号标记。只读展示，不做任何自动改写。"""
     try:
         content = open("/sys/module/pcie_aspm/parameters/policy").read()
     except (IOError, OSError):
@@ -355,7 +371,26 @@ def read_aspm() -> dict:
             policies.append(t.strip("[]\n"))
     policies = [p for p in policies if p]
     return {"policies": policies, "current": current,
-            "supported": bool(policies), "raw": content.strip()}
+            "supported": bool(policies), "raw": content.strip(),
+            # 推荐值：只要不是 powersupersave 就算健康（default 时 L1 已按设备能力启用）
+            "healthy": current not in (None, "powersupersave"),
+            "recommend": "default"}
+
+
+# 禁止的 ASPM 策略：收益 <1W，但会让 SATA/NVMe/网卡进 L1.2，有掉盘掉网卡风险
+ASPM_FORBIDDEN = {"powersupersave"}
+
+# NAS 场景 PL1 安全下限：i5-9500 六核满载在 25W 以下会掉到 2.2GHz 以下，
+# Jellyfin 转码（解码/滤镜/音频仍走 CPU）会卡，而省下的电只有 3~4W。
+PL1_SAFE_MIN = 25.0
+
+
+def _pl1_warn(pl1: float):
+    """PL1 过低时给出一次性提醒（不拦，交给用户）"""
+    if pl1 < PL1_SAFE_MIN:
+        return (f"PL1={pl1}W 低于 NAS 建议下限 25W：六核满载会掉到 2.2GHz 以下，"
+                f"Jellyfin 转码可能卡顿，而省电只有 3~4W（一年电费约十元）。")
+    return None
 
 
 def write_aspm(policy: str) -> str:
@@ -418,6 +453,7 @@ class Handler(BaseHTTPRequestHandler):
                     "noTurbo": read_no_turbo(),
                     "aspm": read_aspm(),
                     "hwp": _read_hwp_info(),
+                    "hwpEnabled": lim.get("hwpEnabled"),
                 })
             except (IOError, OSError) as e:
                 self._json(500, {"ok": False, "error": f"MSR 读取失败: {e}"})
@@ -437,9 +473,10 @@ class Handler(BaseHTTPRequestHandler):
             if not MSR_PATHS:
                 return self._json(503, {"ok": False,
                     "error": "MSR 设备不可用：请在 SSH 执行 modprobe msr 后重启本应用"})
+            # 下限放到 15W：不强行拦截用户，但低于 25W 会带 warn 提醒
             try:
-                pl1 = max(25.0, min(150.0, float(req["pl1"])))
-                pl2 = max(25.0, min(200.0, float(req["pl2"])))
+                pl1 = max(15.0, min(150.0, float(req["pl1"])))
+                pl2 = max(15.0, min(200.0, float(req["pl2"])))
                 tau = max(0.05, min(448.0, float(req.get("tau", 28))))
                 epp = max(0, min(255, int(req.get("epp", 192))))
                 with _lock:
@@ -449,7 +486,8 @@ class Handler(BaseHTTPRequestHandler):
                 lim = read_power_limit()
                 return self._json(200, {"ok": True, "applied": {
                     "pl1": lim["pl1"], "pl2": lim["pl2"], "tau": lim["tau"], "epp": lim["epp"]},
-                    "autoDisabled": was_auto})
+                    "autoDisabled": was_auto,
+                    "warn": _pl1_warn(pl1)})
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
                     "error": f"写入失败（BIOS 可能锁定了功耗墙）: {e}"})
@@ -548,6 +586,10 @@ class Handler(BaseHTTPRequestHandler):
             if not info["supported"]:
                 return self._json(503, {"ok": False,
                     "error": "当前内核未暴露 pcie_aspm 策略参数（可能是内核未启用 CONFIG_PCIEASPM），无法在线修改"})
+            if p in ASPM_FORBIDDEN:
+                return self._json(400, {"ok": False, "aspm": info,
+                    "error": f"已禁用 {p}：实测收益 <1W，但所有 PCIe 链路会进 L1.2，"
+                             f"NAS 上常见掉盘/掉网卡。保持 default 即可（L1 已按设备能力启用）。"})
             if p not in info["policies"]:
                 return self._json(400, {"ok": False, "error": f"未知 ASPM 策略：{p}"})
             try:
@@ -560,8 +602,10 @@ class Handler(BaseHTTPRequestHandler):
             if actual != p:
                 return self._json(200, {"ok": False, "applied": actual, "aspm": after,
                     "error": f"内核接受写入但未生效（回读为 {actual or '未知'}）。"
-                             f"多数飞牛内核对 ASPM 只读，需加引导参数 pcie_aspm.policy={p} 并重启"})
-            return self._json(200, {"ok": True, "applied": actual, "aspm": after})
+                             f"多数飞牛内核对 ASPM 只读，保持 default 即可，不建议为此改引导参数"})
+            return self._json(200, {"ok": True, "applied": actual, "aspm": after,
+                "warn": ("powersave 会让所有链路积极进 L1，若出现掉盘/掉网卡请立即切回 default"
+                         if actual == "powersave" else None)})
 
         self._json(404, {"ok": False, "error": "not found"})
 

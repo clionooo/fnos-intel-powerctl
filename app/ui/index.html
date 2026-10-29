@@ -68,26 +68,38 @@
     <input type="checkbox" id="ntBox" onchange="setNoTurbo(this.checked)">
     <span>关闭睿频 no_turbo（更省电更凉快，突发性能会下降）</span>
   </div>
-  <div class="switch">
-    <span>PCIe ASPM 省电策略（约省 1~2W，24 小时生效）：</span>
-    <select id="aspmSel" onchange="setAspm(this.value)"><option value="">-</option></select>
+  <div class="switch" style="align-items:flex-start">
+    <span style="width:auto">PCIe ASPM 策略：<b id="aspmCur">-</b></span>
     <span id="aspmNote" style="font-size:12px;color:#8792a2"></span>
+  </div>
+  <div class="hint" style="color:#8a6d3b;background:#fcf8e3;border-radius:6px;padding:8px 10px;margin-bottom:8px">
+    ASPM 已改为<b>只读展示</b>，不再提供切档。原因：default 下 L1 已按设备能力启用，链路省电基本到位；
+    改 powersupersave 实测收益 &lt;1W，但会让 SATA 控制器、NVMe、网卡进 L1.2，NAS 上掉盘/掉网卡的风险远大于收益。
   </div>
   <div class="hint">自动模式：空闲（load&lt;0.5 持续 10 分钟）→ 35W 省电档；负载（load&gt;1.5 持续 30 秒）→ 55W 性能档，干活不肉、空闲不费电。睿频关掉后单核锁 3.0GHz。</div>
 </div>
 
 <div class="card">
   <h2>手动调节</h2>
-  <div class="row"><label>PL1 持续功耗墙</label><input type="range" id="pl1" min="25" max="150" step="1"><span class="val" id="pl1v"></span></div>
+  <div class="row"><label>PL1 持续功耗墙</label><input type="range" id="pl1" min="15" max="150" step="1"><span class="val" id="pl1v"></span></div>
+  <div id="pl1warn" style="display:none;font-size:12px;color:#8a6d3b;background:#fcf8e3;border-radius:6px;padding:8px 10px;margin:-6px 0 10px 150px">
+    ⚠️ 低于 25W：i5-9500 六核满载会掉到 2.2GHz 以下，Jellyfin 转码会卡，而省电只有 3~4W。NAS 建议 ≥25W。
+  </div>
   <div class="row"><label>PL2 睿频功耗墙</label><input type="range" id="pl2" min="25" max="200" step="1"><span class="val" id="pl2v"></span></div>
   <div class="row"><label>时间窗 τ（秒）</label><input type="range" id="tau" min="0" max="11" step="1"><span class="val" id="tauv"></span></div>
   <div class="epp" id="eppBtns"></div>
-  <div class="hint" style="margin-top:0">能效偏好 EPP（HWP 平台实际生效的旋钮）：performance 最性能 → power 最省电</div>
+  <div class="hint" id="eppHint" style="margin-top:0">能效偏好 EPP（HWP 平台唯一实际生效的能效旋钮）：performance 最性能 → power 最省电</div>
+  <div class="hint" id="eppOff" style="margin-top:0;display:none;color:#8a6d3b">
+    当前平台未启用 HWP，EPP 不生效。此时代码只写 RAPL 功耗墙，能效由内核 governor 决定。
+  </div>
   <button class="pri" onclick="apply()">应用设置</button>
   <div class="msg" id="msg"></div>
   <div class="hint">
     PL1：长时间允许的封装功耗；PL2：短时睿频功耗；τ：允许以 PL2 运行的时间窗口（硬件只支持 2 的幂档位，会就近取整）；
     EPP：0=最高性能 255=最省电（intel_pstate=active 时内核读取的就是它）。若提示写入失败，说明 BIOS 锁定了 MSR。
+  </div>
+  <div class="hint" style="color:#8a6d3b">
+    EPB（IA32_ENERGY_PERF_BIAS，0x1FC）不再提供设置：HWP 开启后硬件忽略该寄存器，内核也只读 EPP，写它只是心理安慰。
   </div>
 </div>
 
@@ -147,6 +159,7 @@ const bind = (id) => {
   const show = () => {
     if (id === "tau") $(id + "v").textContent = tauVal() + " 秒";
     else $(id + "v").textContent = el.value + " W";
+    if (id === "pl1") $("pl1warn").style.display = (+el.value < 25) ? "block" : "none";
   };
   el.addEventListener("input", show); show();
 };
@@ -174,6 +187,11 @@ async function refresh(){
       $("autoBtn").className = d.auto.enabled ? "pri" : "";
     }
     if (d.noTurbo !== null && d.noTurbo !== undefined) $("ntBox").checked = d.noTurbo;
+    if (d.hwpEnabled === false){
+      $("eppBtns").style.display = "none";
+      $("eppHint").style.display = "none";
+      $("eppOff").style.display = "block";
+    }
     if (d.hwp){
       $("hwpBox").innerHTML =
         "raw = " + d.hwp.raw + "<br>" +
@@ -182,21 +200,16 @@ async function refresh(){
         "Desired_Performance (bit23:16) = " + d.hwp.desired + "<br>" +
         "EPP (bit31:24)                = " + d.hwp.epp + (d.hwp.epp === curEpp ? "  ✅ 与所选一致" : "  （当前所选 " + curEpp + "）");
     }
-    if (d.aspm && d.aspm.policies.length){
-      const sel = $("aspmSel");
-      if (sel.options.length <= 1){
-        d.aspm.policies.forEach(p => {
-          const o = document.createElement("option");
-          o.value = p; o.textContent = p;
-          sel.appendChild(o);
-        });
-      }
-      aspmCurrent = d.aspm.current || "";
-      sel.value = aspmCurrent;
-      if (!aspmCurrent) $("aspmNote").textContent = "（内核未标记当前值）";
-    } else if (d.aspm && !d.aspm.supported){
-      $("aspmSel").disabled = true;
-      $("aspmNote").textContent = "（当前内核不支持在线调整）";
+    if (d.aspm && d.aspm.supported){
+      const cur = d.aspm.current;
+      $("aspmCur").textContent = cur || "未知";
+      $("aspmCur").style.color = (cur === "powersupersave") ? "#c00" : "#1a7f37";
+      $("aspmNote").textContent = (cur === "powersupersave")
+        ? "⚠️ 该策略会让链路进 L1.2，NAS 上有掉盘/掉网卡风险，建议改回 default"
+        : (cur === "default" ? "（健康：L1 已按设备能力启用，无需改动）" : "");
+    } else {
+      $("aspmCur").textContent = "内核未暴露";
+      $("aspmNote").textContent = "（当前内核不支持在线查看 ASPM 策略）";
     }
     if(editing || ["pl1","pl2","tau"].includes(document.activeElement?.id)) return;
     $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
@@ -211,7 +224,8 @@ async function preset(name){
   const d = await r.json();
   if(d.ok){
     const a = d.applied || {};
-    msg(`已应用预设：${name}（实际生效 PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s）` + (d.autoDisabled ? "，自动模式已关闭" : ""));
+    msg(`已应用预设：${name}（实际生效 PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s）`
+        + (d.autoDisabled ? "，自动模式已关闭" : "") + (d.warn ? "｜" + d.warn : ""));
     editing = false; refresh();
   } else msg(d.error, true);
 }
@@ -222,7 +236,8 @@ async function apply(){
   const d = await r.json();
   if(d.ok){
     const a = d.applied || {};
-    msg(`已应用并保存（重启后恢复此手动设置）——实际生效：PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s` + (d.autoDisabled ? "，自动模式已关闭" : ""));
+    msg(`已应用并保存（重启后恢复此手动设置）——实际生效：PL1 ${a.pl1}W / PL2 ${a.pl2}W / τ ${a.tau}s`
+        + (d.autoDisabled ? "，自动模式已关闭" : "") + (d.warn ? "｜" + d.warn : ""));
     editing = false; refresh();
   } else msg(d.error, true);
 }
@@ -253,27 +268,6 @@ async function setNoTurbo(on){
   const r = await fetch(API_BASE + "/api/no_turbo", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({on})});
   const d = await r.json();
   if(d.ok){ msg(on ? "已关闭睿频" : "已开启睿频"); } else msg(d.error, true);
-}
-
-let aspmCurrent = "";
-async function setAspm(p){
-  if(!p) return;
-  const note = $("aspmNote");
-  note.textContent = "写入中…";
-  let d;
-  try{
-    const r = await fetch(API_BASE + "/api/aspm", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({policy:p})});
-    d = await r.json();
-  }catch(e){ d = {ok:false, error:"请求失败：无法连接服务"}; }
-  if(d.ok){
-    note.textContent = "已生效：" + p;
-    msg("ASPM 策略已设为 " + p + "（约省 1~2W）");
-    aspmCurrent = p;
-  }else{
-    note.textContent = "未生效，仍为 " + (aspmCurrent || "默认");
-    $("aspmSel").value = aspmCurrent;   // 失败时下拉框回到实际值，不再显示成横杠
-    msg(d.error, true);
-  }
 }
 
 renderEpp();
