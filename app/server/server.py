@@ -322,19 +322,32 @@ def write_no_turbo(on: bool):
 
 
 def read_aspm() -> dict:
+    """解析 /sys/module/pcie_aspm/parameters/policy
+    内容形如: default performance [powersave] powersupersave
+    当前生效值用方括号标记"""
     try:
         content = open("/sys/module/pcie_aspm/parameters/policy").read()
-        policies = [x.strip("[]\n") for x in content.split()]
-        current = next((x for x in policies if x.startswith("[")), None)
-        return {"policies": [p for p in policies if p and not p.startswith("[")],
-                "current": current}
     except (IOError, OSError):
-        return {"policies": [], "current": None}
+        return {"policies": [], "current": None, "supported": False}
+    tokens = content.split()
+    current = None
+    policies = []
+    for t in tokens:
+        if t.startswith("[") and t.endswith("]"):
+            current = t[1:-1]
+            policies.append(current)
+        else:
+            policies.append(t.strip("[]\n"))
+    policies = [p for p in policies if p]
+    return {"policies": policies, "current": current,
+            "supported": bool(policies), "raw": content.strip()}
 
 
-def write_aspm(policy: str):
+def write_aspm(policy: str) -> str:
+    """写入 ASPM 策略并回读验证，返回实际生效值"""
     with open("/sys/module/pcie_aspm/parameters/policy", "w") as f:
         f.write(policy)
+    return (read_aspm().get("current") or "")
 
 
 # ------------------------------------------------------------------
@@ -488,14 +501,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if self._path().startswith("/api/aspm"):
             p = str(req.get("policy", ""))
-            if p not in read_aspm()["policies"]:
-                return self._json(400, {"ok": False, "error": "未知 ASPM 策略"})
+            info = read_aspm()
+            if not info["supported"]:
+                return self._json(503, {"ok": False,
+                    "error": "当前内核未暴露 pcie_aspm 策略参数（可能是内核未启用 CONFIG_PCIEASPM），无法在线修改"})
+            if p not in info["policies"]:
+                return self._json(400, {"ok": False, "error": f"未知 ASPM 策略：{p}"})
             try:
-                write_aspm(p)
-                return self._json(200, {"ok": True, "aspm": read_aspm()})
+                actual = write_aspm(p)
             except (IOError, OSError) as e:
                 return self._json(500, {"ok": False,
-                    "error": f"ASPM 写入失败（可能需要内核参数 pcie_aspm.policy=... 并重启）: {e}"})
+                    "error": f"ASPM 写入被内核拒绝：{e}。这是正常限制——运行时切换只在部分内核/驱动下可用；"
+                             f"永久生效需在引导参数加 pcie_aspm.policy={p} 后重启（我可以给你命令）"})
+            after = read_aspm()
+            if actual != p:
+                return self._json(200, {"ok": False, "applied": actual, "aspm": after,
+                    "error": f"内核接受写入但未生效（回读为 {actual or '未知'}）。"
+                             f"多数飞牛内核对 ASPM 只读，需加引导参数 pcie_aspm.policy={p} 并重启"})
+            return self._json(200, {"ok": True, "applied": actual, "aspm": after})
 
         self._json(404, {"ok": False, "error": "not found"})
 

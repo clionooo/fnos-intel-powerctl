@@ -71,6 +71,7 @@
   <div class="switch">
     <span>PCIe ASPM 省电策略（约省 1~2W，24 小时生效）：</span>
     <select id="aspmSel" onchange="setAspm(this.value)"><option value="">-</option></select>
+    <span id="aspmNote" style="font-size:12px;color:#8792a2"></span>
   </div>
   <div class="hint">自动模式：空闲（load&lt;0.5 持续 10 分钟）→ 35W 省电档；负载（load&gt;1.5 持续 30 秒）→ 55W 性能档，干活不肉、空闲不费电。睿频关掉后单核锁 3.0GHz。</div>
 </div>
@@ -172,7 +173,12 @@ async function refresh(){
           sel.appendChild(o);
         });
       }
-      sel.value = d.aspm.current || "";
+      aspmCurrent = d.aspm.current || "";
+      sel.value = aspmCurrent;
+      if (!aspmCurrent) $("aspmNote").textContent = "（内核未标记当前值）";
+    } else if (d.aspm && !d.aspm.supported){
+      $("aspmSel").disabled = true;
+      $("aspmNote").textContent = "（当前内核不支持在线调整）";
     }
     if(editing || ["pl1","pl2","tau"].includes(document.activeElement?.id)) return;
     $("pl1").value = d.pl1; $("pl1").dispatchEvent(new Event("input"));
@@ -222,11 +228,25 @@ async function setNoTurbo(on){
   if(d.ok){ msg(on ? "已关闭睿频" : "已开启睿频"); } else msg(d.error, true);
 }
 
+let aspmCurrent = "";
 async function setAspm(p){
   if(!p) return;
-  const r = await fetch(API_BASE + "/api/aspm", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({policy:p})});
-  const d = await r.json();
-  if(d.ok){ msg("ASPM 策略已设为 " + p); } else msg(d.error, true);
+  const note = $("aspmNote");
+  note.textContent = "写入中…";
+  let d;
+  try{
+    const r = await fetch(API_BASE + "/api/aspm", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({policy:p})});
+    d = await r.json();
+  }catch(e){ d = {ok:false, error:"请求失败：无法连接服务"}; }
+  if(d.ok){
+    note.textContent = "已生效：" + p;
+    msg("ASPM 策略已设为 " + p + "（约省 1~2W）");
+    aspmCurrent = p;
+  }else{
+    note.textContent = "未生效，仍为 " + (aspmCurrent || "默认");
+    $("aspmSel").value = aspmCurrent;   // 失败时下拉框回到实际值，不再显示成横杠
+    msg(d.error, true);
+  }
 }
 
 renderEpp();
